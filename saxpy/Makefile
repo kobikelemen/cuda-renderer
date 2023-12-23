@@ -19,9 +19,10 @@ ifeq ($(ARCH), Darwin)
 LDFLAGS=-L/usr/local/depot/cuda-8.0/lib/ -lcudart
 else
 # Building on Linux
-LDFLAGS=-L/usr/local/cuda/lib64/ -lcudart
+#LDFLAGS=-L/usr/local/cuda/lib64/ -lcudart
+LDFLAGS=-L/usr/local/cuda-11.6/lib64/ -lcudart
 endif
-NVCC=nvcc
+NVCC=/usr/local/cuda-11.6/bin/nvcc
 NVCCFLAGS=-O3 -m64
 
 
