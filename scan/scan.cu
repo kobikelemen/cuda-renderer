@@ -27,6 +27,32 @@ static inline int nextPow2(int n) {
     return n;
 }
 
+
+__global__ void upsweep_kernel(int N, int two_d, int two_dplus1, int* d_result) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx % two_dplus1 == 0) {
+        d_result[idx + two_dplus1 - 1] += d_result[idx + two_d - 1];
+    }
+
+}
+
+
+__global__ void downsweep_kernel(int N, int two_d, int two_dplus1, int* d_result) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx == N-1 && two_d == N/2) {
+        d_result[N-1] = 0;
+    }
+
+    if (idx % two_dplus1 == 0) {
+        int t = d_result[idx+two_d-1];
+        d_result[idx+two_d-1] = d_result[idx+two_dplus1-1];
+        d_result[idx+two_dplus1-1] += t;
+    }
+ }
+
+
 // exclusive_scan --
 //
 // Implementation of an exclusive scan on global memory array `input`,
@@ -45,15 +71,27 @@ static inline int nextPow2(int n) {
 void exclusive_scan(int* input, int N, int* result)
 {
 
-    // CS149 TODO:
-    //
-    // Implement your exclusive scan implementation here.  Keep in
-    // mind that although the arguments to this function are device
-    // allocated arrays, this is a function that is running in a thread
-    // on the CPU.  Your implementation will need to make multiple calls
-    // to CUDA kernel functions (that you must write) to implement the
-    // scan.
+    const int threads_per_block = 32;
+    const int blocks = N / threads_per_block; // assuming N is multiple of threads_per_block
 
+    int * d_result;
+    cudaMalloc(&d_result, N * sizeof(int));
+
+    cudaMemcpy(d_result, input, N * sizeof(int), cudaMemcpyHostToDevice);
+
+    for (int two_d = 1; two_d <= N/2; two_d*=2) {
+        int two_dplus1 = 2*two_d;
+        upsweep_kernel<<<blocks, threads_per_block>>>(N, two_d, two_dplus1, d_result);
+    }
+
+    cudaDeviceSynchronize();
+
+    for (int two_d = N/2; two_d >= 1; two_d /= 2) {
+        int two_dplus1 = 2*two_d;
+        downsweep_kernel<<<blocks, threads_per_block>>>(N, two_d, two_dplus1, d_result);
+    }
+    
+    cudaMemcpy(result, d_result, N * sizeof(int), cudaMemcpyDeviceToHost);
 
 }
 
