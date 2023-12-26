@@ -31,6 +31,9 @@ struct GlobalConstants {
     int imageWidth;
     int imageHeight;
     float* imageData;
+
+    // // Kobi added:
+    // int* circleMask;
 };
 
 // Global variable that is in scope, but read-only, for all cuda
@@ -430,6 +433,51 @@ __global__ void kernelRenderCircles() {
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
+
+__global__ void kernelRenderCircles2(int* circleMask) {
+
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (index >= cuConstRendererParams.numCircles || circleMask[index] != 1)
+        return;
+
+    int index3 = 3 * index;
+
+    // read position and radius
+    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+    float  rad = cuConstRendererParams.radius[index];
+
+    // compute the bounding box of the circle. The bound is in integer
+    // screen coordinates, so it's clamped to the edges of the screen.
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+    short minX = static_cast<short>(imageWidth * (p.x - rad));
+    short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
+    short minY = static_cast<short>(imageHeight * (p.y - rad));
+    short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
+
+    // a bunch of clamps.  Is there a CUDA built-in for this?
+    short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
+    short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
+    short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
+    short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
+
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+
+    // for all pixels in the bonding box
+    for (int pixelY=screenMinY; pixelY<screenMaxY; pixelY++) {
+        float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + screenMinX)]);
+        for (int pixelX=screenMinX; pixelX<screenMaxX; pixelX++) {
+            float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));
+            shadePixel(index, pixelCenterNorm, p, imgPtr);
+            imgPtr++;
+        }
+    }
+}
+
+
 CudaRenderer::CudaRenderer() {
     image = NULL;
 
@@ -633,13 +681,85 @@ CudaRenderer::advanceAnimation() {
     cudaDeviceSynchronize();
 }
 
+bool 
+CudaRenderer::circlesOverlap(float p1x, float p1y, float r1, 
+                            float p2x, float p2y, float r2) {
+    float c1Left = p1x - r1;
+    float c1Right = p1x + r1;
+    float c1Top = p1y + r1;
+    float c1Bot = p1y - r1;
+
+    float c2Left = p2x - r2;
+    float c2Right = p2x + r2;
+    float c2Top = p2y + r2;
+    float c2Bot = p2y - r2;
+
+    if (c1Left < c2Right && c1Right > c2Left &&
+            c1Top > c2Bot && c1Bot < c2Top) {
+        return true;
+    }
+    return false;
+}
+
+// Basically finds start idx list of consecutive non-overlapping circles
+// Assumes numCircles > 1
+std::vector<int> 
+CudaRenderer::getNewGrpIdxs(float* position, float* radius, 
+                                            int numCircles) {
+    int grpStartIdx = 0;
+    int i = 1;
+    std::vector<int> newGrpIdxs;
+    for (; i < numCircles; i++) {
+        for (int j=grpStartIdx; j < i; j++) {
+            if (circlesOverlap(position[3*i], position[3*i+1], radius[i], 
+                               position[3*j], position[3*j+1], radius[j])) {
+                newGrpIdxs.push_back(i);
+                grpStartIdx = i;
+                break;
+            }
+        }
+    }
+    newGrpIdxs.push_back(numCircles);
+    return newGrpIdxs;
+}
+
+
 void
 CudaRenderer::render() {
+    // 256 threads per block is a healthy number
+    dim3 blockDim(256, 1);
+    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+    
+    std::vector<int> newGrpIdxs = getNewGrpIdxs(position, radius, numCircles);
+    int* mask = new int[numCircles];
+    int * d_mask;
+    cudaMalloc(&d_mask, numCircles * sizeof(int));
+
+    for (int i=0; i < newGrpIdxs.size(); i ++) {
+        int newGrpIdx = newGrpIdxs[i];
+        int oldGrpIdx = (i == 0) ? 0 : newGrpIdxs[i-1];
+        for (int j=0; j < numCircles; j++) {
+            if (j >= oldGrpIdx && j < newGrpIdx) {
+                mask[j] = 1;
+            } else {
+                mask[j] = 0;
+            }
+        }
+        cudaMemcpy(d_mask, mask, sizeof(int) * numCircles, cudaMemcpyHostToDevice);
+        kernelRenderCircles2<<<gridDim, blockDim>>>(d_mask);
+        cudaDeviceSynchronize();  
+    }
+    cudaFree(d_mask);
+    delete[] mask;
+}
+
+void
+CudaRenderer::renderOld() {
 
     // 256 threads per block is a healthy number
     dim3 blockDim(256, 1);
     dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
-
+     
     kernelRenderCircles<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();
 }

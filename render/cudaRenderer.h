@@ -46,11 +46,20 @@ public:
 
     void render();
 
+    void renderOld();
+
     void shadePixel(
         int circleIndex,
         float pixelCenterX, float pixelCenterY,
         float px, float py, float pz,
         float* pixelData);
+    
+    bool circlesOverlap(float p1x, float p1y, float r1, 
+                        float p2x, float p2y, float r2);
+    
+    std::vector<int> getNewGrpIdxs(float* position, float* radius, 
+                                                    int numCircles);
+
 };
 
 
