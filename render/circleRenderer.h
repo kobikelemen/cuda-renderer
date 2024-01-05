@@ -7,6 +7,8 @@ struct Image;
 #define NUM_FIREWORKS 15
 #define NUM_SPARKS 20
 
+#include "cycleTimer.h"
+
 typedef enum {
     CIRCLE_RGB,
     CIRCLE_RGBY,

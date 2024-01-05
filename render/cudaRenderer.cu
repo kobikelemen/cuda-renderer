@@ -31,9 +31,6 @@ struct GlobalConstants {
     int imageWidth;
     int imageHeight;
     float* imageData;
-
-    // // Kobi added:
-    // int* circleMask;
 };
 
 // Global variable that is in scope, but read-only, for all cuda
@@ -366,9 +363,7 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
 
     float oneMinusAlpha = 1.f - alpha;
 
-    // BEGIN SHOULD-BE-ATOMIC REGION
     // global memory read
-
     float4 existingColor = *imagePtr;
     float4 newColor;
     newColor.x = alpha * rgb.x + oneMinusAlpha * existingColor.x;
@@ -379,7 +374,6 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
     // global memory write
     *imagePtr = newColor;
 
-    // END SHOULD-BE-ATOMIC REGION
 }
 
 // kernelRenderCircles -- (CUDA device code)
@@ -476,6 +470,27 @@ __global__ void kernelRenderCircles2(int* circleMask) {
         }
     }
 }
+
+
+__global__ void kernelRenderCircles3(float3 cpos, int cindex,
+                                     short screenMinX, short screenMaxX,
+                                     short screenMinY, short screenMaxY) {
+    
+    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+    if (pixelX >= screenMaxX || pixelX < screenMinX || pixelY >= screenMaxY || pixelY < screenMinY) {
+        return;
+    }
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                        invHeight * (static_cast<float>(pixelY) + 0.5f));
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+    shadePixel(cindex, pixelCenterNorm, cpos, imgPtr);
+}
+
 
 
 CudaRenderer::CudaRenderer() {
@@ -725,17 +740,30 @@ CudaRenderer::getNewGrpIdxs(float* position, float* radius,
 
 
 void
-CudaRenderer::render() {
+CudaRenderer::renderOld() {
     // 256 threads per block is a healthy number
     dim3 blockDim(256, 1);
     dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
     
+    double startTimeTotal = CycleTimer::currentSeconds();
+
     std::vector<int> newGrpIdxs = getNewGrpIdxs(position, radius, numCircles);
+    // printf("newGrpIdxs elems:   ");
+    // for (int elem : newGrpIdxs) {
+    //     printf("%i, ", elem);
+    // }
+    // printf("\n");
+    double endTimeGrpIdxs = CycleTimer::currentSeconds();
+    double totalMaskTime = 0.f;
+    double totalRenderTime = 0.f;
+
+
     int* mask = new int[numCircles];
     int * d_mask;
     cudaMalloc(&d_mask, numCircles * sizeof(int));
 
     for (int i=0; i < newGrpIdxs.size(); i ++) {
+        double startTimeMask = CycleTimer::currentSeconds();
         int newGrpIdx = newGrpIdxs[i];
         int oldGrpIdx = (i == 0) ? 0 : newGrpIdxs[i-1];
         for (int j=0; j < numCircles; j++) {
@@ -745,16 +773,76 @@ CudaRenderer::render() {
                 mask[j] = 0;
             }
         }
+        double endTimeMask = CycleTimer::currentSeconds();
+        totalMaskTime += endTimeMask - startTimeMask;
+        
+        double startTimeRender = CycleTimer::currentSeconds();
         cudaMemcpy(d_mask, mask, sizeof(int) * numCircles, cudaMemcpyHostToDevice);
         kernelRenderCircles2<<<gridDim, blockDim>>>(d_mask);
         cudaDeviceSynchronize();  
+        double endTimeRender = CycleTimer::currentSeconds();
+
+        totalRenderTime += endTimeRender - startTimeRender;
     }
     cudaFree(d_mask);
     delete[] mask;
+
+    double endTimeTotal = CycleTimer::currentSeconds();
+
+    printf("TOTAL TIME: %f\n", endTimeTotal - startTimeTotal);
+    printf("GET GROUP IDXs TIME: %f\n", endTimeGrpIdxs - startTimeTotal);
+    printf("MASK TIME: %f\n", totalMaskTime);
+    printf("RENDER TIME: %f\n", totalRenderTime);
 }
 
 void
-CudaRenderer::renderOld() {
+CudaRenderer::render() {    
+    double startTimeTotal = CycleTimer::currentSeconds();
+    std::vector<int> newGrpIdxs = getNewGrpIdxs(position, radius, numCircles);
+    double endTimeGrpIdxs = CycleTimer::currentSeconds();
+    double totalMaskTime = 0.f;
+    double totalRenderTime = 0.f;
+    short imageWidth = image->width;
+    short imageHeight = image->height;
+
+    for (int i=0; i < newGrpIdxs.size(); i ++) {
+        
+        int newGrpIdx = newGrpIdxs[i];
+        int oldGrpIdx = (i == 0) ? 0 : newGrpIdxs[i-1];
+        double startTimeRender = CycleTimer::currentSeconds();
+        for (int j=oldGrpIdx; j < newGrpIdx; j ++) {
+            int cindex = j;
+            int cindex3 = 3 * cindex;
+            float3 cpos = *(float3*)(&position[cindex3]);
+            float  rad = radius[cindex];
+            short minX = static_cast<short>(imageWidth * (cpos.x - rad));
+            short maxX = static_cast<short>(imageWidth * (cpos.x + rad)) + 1;
+            short minY = static_cast<short>(imageHeight * (cpos.y - rad));
+            short maxY = static_cast<short>(imageHeight * (cpos.y + rad)) + 1;
+        
+            // a bunch of clamps.  Is there a CUDA built-in for this?
+            short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
+            short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
+            short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
+            short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
+            int blockDimX = 16;
+            int blockDimY = 16;
+            int gridDimX = (imageWidth % blockDimX == 0) ? (imageWidth / blockDimX) : ((int)(imageWidth / blockDimX) + 1) + 1; 
+            int gridDimY = (imageHeight % blockDimY == 0) ? (imageHeight / blockDimY) : ((int)(imageHeight / blockDimY) + 1) + 1; 
+            int numBlocks = gridDimX * gridDimY;
+            dim3 blockDim(blockDimX, blockDimY);
+            dim3 gridDim(gridDimX, gridDimY);
+            kernelRenderCircles3<<<gridDim, blockDim>>>(cpos, cindex, screenMinX, screenMaxX, screenMinY, screenMaxY);
+        }
+        cudaDeviceSynchronize();  
+    }
+
+    double endTimeTotal = CycleTimer::currentSeconds();
+    printf("TOTAL TIME: %f\n", endTimeTotal - startTimeTotal);
+}
+
+void
+CudaRenderer::renderOldOld() {
 
     // 256 threads per block is a healthy number
     dim3 blockDim(256, 1);

@@ -48,6 +48,8 @@ public:
 
     void renderOld();
 
+    void renderOldOld();
+
     void shadePixel(
         int circleIndex,
         float pixelCenterX, float pixelCenterY,

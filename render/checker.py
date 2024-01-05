@@ -46,7 +46,7 @@ def get_time(render_cmd, scene):
 
     # Actually run the renderer
     result = subprocess.run([cmd_string], shell=True, capture_output=True)
-
+    # print("render_cmd: ", render_cmd, "\nresult: ", str(result.stdout))
     # Extract the time taken
     time = float(re.search(r'\d+\.\d+', str(result.stdout)).group())
     return time
@@ -73,10 +73,10 @@ def run_scenes(n_runs):
 
             # Do multiple perf runs
             stu_times[scene] = [get_time("render", scene) for _ in range(n_runs)]
-            ref_times[scene] = [get_time("render_ref", scene) for _ in range(n_runs)]
+            # ref_times[scene] = [get_time("render_ref", scene) for _ in range(n_runs)]
 
             print("[%s] Student times: " % (scene), stu_times[scene])
-            print("[%s] Reference times: " % (scene), ref_times[scene])
+            # print("[%s] Reference times: " % (scene), ref_times[scene])
 
     return correct, stu_times, ref_times
 
